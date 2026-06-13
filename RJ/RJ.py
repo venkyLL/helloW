@@ -896,27 +896,42 @@ def prompt_float(label: str, default: Optional[float] = None) -> float:
     default_str = f" [{default}]" if default is not None else ""
     while True:
         raw = input(f"  {label}{default_str}: ").strip()
-        if raw == "" and default is not None:
-            return default
+        if raw == "":
+            if default is not None:
+                return default
+            print("    Please enter a number.")
+            continue
         try:
             return float(raw)
         except ValueError:
-            print(f"    Please enter a number.")
+            print("    Please enter a number.")
+
+
+def prompt_optional_float(label: str) -> Optional[float]:
+    """Like prompt_float but pressing Enter returns None."""
+    raw = input(f"  {label}: ").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        print("    Invalid number — skipping.")
+        return None
 
 
 def interactive_mode():
     print("\n  === Vanna-Neutral 3-1-1 Hedge Calculator (Interactive) ===\n")
     spot = prompt_float("XSP Spot Price")
     vix = prompt_float("VIX Level")
-    iv_raw = prompt_float("6M Implied Vol % (press Enter to use VIX×1.1)", None)
+    iv_raw = prompt_optional_float("6M Implied Vol % (Enter to use VIX×1.1)")
     iv = (iv_raw / 100.0) if iv_raw else None
     rate = prompt_float("Risk-Free Rate %", 4.5) / 100.0
     notional = prompt_float("Portfolio Notional ($)", 1_000_000)
     date_raw = input(f"  Calculation Date [today={date.today()}]: ").strip()
     calc_date = date.fromisoformat(date_raw) if date_raw else date.today()
-    lrd_raw = input("  Last Roll Date YYYY-MM-DD (optional, press Enter to skip): ").strip()
+    lrd_raw = input("  Last Roll Date YYYY-MM-DD (Enter to skip): ").strip()
     last_roll_date = date.fromisoformat(lrd_raw) if lrd_raw else None
-    lrs_raw = input("  Last Roll XSP Spot (optional, press Enter to skip): ").strip()
+    lrs_raw = input("  Last Roll XSP Spot (Enter to skip): ").strip()
     last_roll_spot = float(lrs_raw) if lrs_raw else None
     return spot, vix, iv, rate, notional, calc_date, last_roll_date, last_roll_spot
 
