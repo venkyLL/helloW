@@ -791,6 +791,118 @@ def print_scenario_sheet(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  1-YEAR COST TABLE
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _intrinsic_put_payoff(legs: list, spot: float) -> float:
+    """Net intrinsic value of put spine at expiry (T=0) for a given spot."""
+    total = 0.0
+    for leg in legs:
+        intrinsic = max(leg.computed_strike - spot, 0.0)
+        if leg.action == "BUY":
+            total += intrinsic * leg.quantity * XSP_MULTIPLIER
+        else:
+            total -= intrinsic * leg.quantity * XSP_MULTIPLIER
+    return total
+
+
+def _intrinsic_call_payoff(legs: list, spot: float) -> float:
+    """Net intrinsic value of call engine at expiry (T=0) for a given spot."""
+    total = 0.0
+    for leg in legs:
+        intrinsic = max(spot - leg.computed_strike, 0.0)
+        if leg.action == "BUY":
+            total += intrinsic * leg.quantity * XSP_MULTIPLIER
+        else:
+            total -= intrinsic * leg.quantity * XSP_MULTIPLIER
+    return total
+
+
+def compute_1year_table(
+    spot: float,
+    put_legs: list,
+    call_legs: list,
+    notional: float,
+    net_put_per_roll: float,
+    net_call_per_month: float,
+) -> list:
+    """
+    For each -25% to +25% move in 5% increments, compute 1-year P&L assuming:
+      - Put spine rolled twice (two 6M rolls at same premiums)
+      - Call engine rolled monthly (12 rolls at same premiums)
+      - Final expiry payoffs based on intrinsic value at scenario spot
+    Returns list of dicts with keys: pct, spot_new, portfolio, put_pnl, call_pnl, hedge_pnl, net_pnl
+    """
+    rows = []
+    for pct in range(-25, 30, 5):
+        spot_new = spot * (1 + pct / 100)
+        portfolio_pnl = notional * pct / 100
+
+        # Put spine: pay 2 roll entries, collect intrinsic payoff once at final expiry
+        put_entry_cost = net_put_per_roll * 2           # e.g. 2 × -$70K = -$140K
+        put_payoff = _intrinsic_put_payoff(put_legs, spot_new)
+        put_pnl = put_entry_cost + put_payoff
+
+        # Call engine: collect 12 monthly credits, pay intrinsic on final roll's expiry
+        # Assumes 11 rolls expire worthless; final roll bears scenario-spot intrinsic
+        call_income = net_call_per_month * 12           # e.g. 12 × +$5,307 = +$63K
+        call_payoff = _intrinsic_call_payoff(call_legs, spot_new)  # ≤0 for rally
+        call_pnl = call_income + call_payoff
+
+        hedge_pnl = put_pnl + call_pnl
+        net_pnl = portfolio_pnl + hedge_pnl
+
+        rows.append(dict(
+            pct=pct,
+            spot_new=spot_new,
+            portfolio=portfolio_pnl,
+            put_pnl=put_pnl,
+            call_pnl=call_pnl,
+            hedge_pnl=hedge_pnl,
+            net_pnl=net_pnl,
+        ))
+    return rows
+
+
+def print_1year_table(rows: list, notional: float):
+    W = 72
+    LINE = "=" * W
+    DASH = "-" * W
+
+    print(f"\n{LINE}")
+    print(f"  1-YEAR SCENARIO COST TABLE  (flat premiums, 2 put rolls + 12 call rolls)")
+    print(LINE)
+
+    headers = ["Move", "XSP", "Portfolio", "Put P&L", "Call P&L", "Hedge P&L", "NET P&L", "Net %"]
+    table_rows = []
+    for r in rows:
+        net_pct = r["net_pnl"] / notional * 100
+        marker = " ◀" if r["pct"] == 0 else ""
+        table_rows.append([
+            f"{r['pct']:+d}%{marker}",
+            f"{r['spot_new']:.0f}",
+            _fmt_dollar(r["portfolio"]),
+            _fmt_dollar(r["put_pnl"]),
+            _fmt_dollar(r["call_pnl"]),
+            _fmt_dollar(r["hedge_pnl"]),
+            _fmt_dollar(r["net_pnl"]),
+            f"{net_pct:+.1f}%",
+        ])
+
+    if HAS_TABULATE:
+        print(tabulate(table_rows, headers=headers, tablefmt="simple",
+                       colalign=("left", "right", "right", "right", "right", "right", "right", "right")))
+    else:
+        print(f"  {'Move':>6} {'XSP':>6} {'Portfolio':>11} {'Put P&L':>11} {'Call P&L':>10} {'Hedge P&L':>11} {'NET P&L':>11} {'Net%':>6}")
+        for r in table_rows:
+            print(f"  {r[0]:>6} {r[1]:>6} {r[2]:>11} {r[3]:>11} {r[4]:>10} {r[5]:>11} {r[6]:>11} {r[7]:>6}")
+
+    print(f"\n  Assumptions: put spine rolled 2× at entry premiums; call engine")
+    print(f"  rolled 12× at entry premiums; payoffs based on intrinsic at year-end.")
+    print(f"{LINE}\n")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  OUTPUT FORMATTER
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1175,7 +1287,20 @@ def main():
         data_source=data_source,
     )
 
-    # ── Step 4: optional scenario analysis ────────────────────────────────────
+    # ── Step 4: 1-year cost table (always shown) ──────────────────────────────
+    net_put = sum(l.est_total for l in put_legs)
+    net_call = sum(l.est_total for l in call_legs)
+    year_rows = compute_1year_table(
+        spot=spot,
+        put_legs=put_legs,
+        call_legs=call_legs,
+        notional=notional,
+        net_put_per_roll=net_put,
+        net_call_per_month=net_call,
+    )
+    print_1year_table(year_rows, notional)
+
+    # ── Step 5: optional scenario analysis ────────────────────────────────────
     if args.scenario is not None:
         leg_results, hedge_pnl, portfolio_pnl, net_pnl = compute_scenario_pnl(
             spot_orig=spot,
