@@ -10,7 +10,7 @@ from .data import fetch_live_yfinance, fetch_ibkr_chain
 from .legs import classify_vix, nearest_expiry, PUT_LEGS, build_put_spine, build_call_engine
 from .output import check_roll_alerts, print_position_sheet
 from .scenario import compute_scenario_pnl, print_scenario_sheet, compute_1year_table, print_1year_table
-from .greeks import compute_portfolio_greeks, print_greeks_summary
+from .greeks import compute_portfolio_greeks, compute_vanna_neutral_adjustment, print_greeks_summary
 
 
 def parse_args():
@@ -52,6 +52,8 @@ Examples:
     p.add_argument("--ibkr-client-id",  type=int,   default=10)
     p.add_argument("--scenario",        type=float, default=None,
                    help="Hypothetical XSP spot price — shows hedge P&L vs. portfolio loss at that level")
+    p.add_argument("--auto-vanna",      action="store_true",
+                   help="Auto-adjust Short Subsidy quantity to achieve vanna-neutral portfolio")
     return p.parse_args()
 
 
@@ -212,7 +214,20 @@ def main():
 
     # ── Step 4: portfolio Greeks ───────────────────────────────────────────────
     leg_greeks = compute_portfolio_greeks(put_legs, call_legs, spot, iv, rate, calc_date)
-    print_greeks_summary(leg_greeks)
+    adjustment = compute_vanna_neutral_adjustment(leg_greeks, put_legs, spot, iv, rate, calc_date)
+
+    if args.auto_vanna and adjustment:
+        print(f"\n  [auto-vanna] Rebuilding with Short Subsidy qty "
+              f"{adjustment['current_qty']} → {adjustment['recommended_qty']} contracts ...")
+        put_legs, zone, mult = build_put_spine(
+            spot, vix, iv, rate, notional, calc_date,
+            ibkr_chain=ibkr_chain,
+            subsidy_qty=adjustment["recommended_qty"],
+        )
+        leg_greeks = compute_portfolio_greeks(put_legs, call_legs, spot, iv, rate, calc_date)
+        adjustment = None  # already applied — suppress suggestion
+
+    print_greeks_summary(leg_greeks, adjustment=adjustment)
 
     # ── Step 5: 1-year cost table ──────────────────────────────────────────────
     net_put = sum(l.est_total for l in put_legs)

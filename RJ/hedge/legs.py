@@ -111,8 +111,12 @@ def build_put_spine(
     spot: float, vix: float, iv: float, rate: float,
     notional: float, calc_date: date,
     ibkr_chain: Optional[Dict] = None,
+    subsidy_qty: Optional[int] = None,
 ) -> Tuple[List[Leg], int, float]:
-    """Build the 5-leg put spine. Returns (legs, zone, mult)."""
+    """Build the 5-leg put spine. Returns (legs, zone, mult).
+
+    subsidy_qty: if set, overrides the computed quantity for the Short Subsidy leg (index 2).
+    """
     zone, mult, put_tenor, wing_tenor = classify_vix(vix)
     sizing = mult * (notional / BASE_NOTIONAL)
 
@@ -142,6 +146,8 @@ def build_put_spine(
             price_source = "BS"
 
         qty = max(1, round(leg_def["base_qty"] * sizing))
+        if i == 2 and subsidy_qty is not None:  # Short Subsidy override
+            qty = max(1, subsidy_qty)
         dte = (expiry - calc_date).days
 
         total = (-price if leg_def["action"] == "BUY" else +price) * qty * XSP_MULTIPLIER

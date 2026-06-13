@@ -5,7 +5,7 @@ import pytest
 from datetime import date
 from hedge.bs import bs_gamma, bs_vanna, bs_theta_put, bs_theta_call, bs_put_delta, bs_call_delta
 from hedge.legs import build_put_spine, build_call_engine
-from hedge.greeks import compute_portfolio_greeks
+from hedge.greeks import compute_portfolio_greeks, compute_vanna_neutral_adjustment
 
 S, K, T, r, sigma = 741.28, 700.0, 0.5, 0.045, 0.20
 CALC_DATE = date(2026, 6, 13)
@@ -111,3 +111,45 @@ class TestPortfolioGreeks:
         sell_legs = [g for g in self.leg_greeks if g.action == "SELL"]
         assert all(g.gamma > 0 for g in buy_legs), "Long legs: positive gamma"
         assert all(g.gamma < 0 for g in sell_legs), "Short legs: negative gamma"
+
+
+class TestVannaNeutralAdjustment:
+    def setup_method(self):
+        self.put_legs, _, _ = build_put_spine(S, 18.5, sigma, r, NOTIONAL, CALC_DATE)
+        self.call_legs = build_call_engine(S, 18.5, sigma, r, NOTIONAL, CALC_DATE)
+        self.leg_greeks = compute_portfolio_greeks(
+            self.put_legs, self.call_legs, S, sigma, r, CALC_DATE
+        )
+        self.adj = compute_vanna_neutral_adjustment(
+            self.leg_greeks, self.put_legs, S, sigma, r, CALC_DATE
+        )
+
+    def test_returns_dict(self):
+        assert self.adj is not None
+        assert isinstance(self.adj, dict)
+
+    def test_has_required_keys(self):
+        for key in ("current_qty", "recommended_qty", "delta_qty", "projected_vanna", "vanna_per_contract"):
+            assert key in self.adj
+
+    def test_recommended_qty_positive(self):
+        assert self.adj["recommended_qty"] >= 1
+
+    def test_delta_qty_matches(self):
+        assert self.adj["delta_qty"] == self.adj["recommended_qty"] - self.adj["current_qty"]
+
+    def test_projected_vanna_near_zero(self):
+        # After adjustment, vanna should be close to zero (within 1 contract's worth)
+        assert abs(self.adj["projected_vanna"]) <= abs(self.adj["vanna_per_contract"])
+
+    def test_rebuild_achieves_vanna_neutral(self):
+        # Rebuild with the recommended qty and verify portfolio vanna drops significantly
+        new_put_legs, _, _ = build_put_spine(
+            S, 18.5, sigma, r, NOTIONAL, CALC_DATE,
+            subsidy_qty=self.adj["recommended_qty"],
+        )
+        new_greeks = compute_portfolio_greeks(new_put_legs, self.call_legs, S, sigma, r, CALC_DATE)
+        old_vanna = sum(g.vanna for g in self.leg_greeks)
+        new_vanna = sum(g.vanna for g in new_greeks)
+        assert abs(new_vanna) < abs(old_vanna), "Rebalanced vanna should be closer to zero"
+        assert abs(new_vanna) < 100, "Rebalanced portfolio should be near vanna-neutral"

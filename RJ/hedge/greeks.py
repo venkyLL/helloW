@@ -2,11 +2,14 @@
 
 from dataclasses import dataclass
 from datetime import date
-from typing import List
+from typing import Dict, List, Optional
 
 from .bs import bs_gamma, bs_vanna, bs_theta_put, bs_theta_call, bs_put_delta, bs_call_delta
 from .legs import Leg, XSP_MULTIPLIER
 from .compat import HAS_TABULATE, tabulate
+
+# PUT_LEGS index of the Short Subsidy — the vanna lever
+_SUBSIDY_IDX = 2
 
 
 @dataclass
@@ -56,7 +59,45 @@ def compute_portfolio_greeks(
     return results
 
 
-def print_greeks_summary(leg_greeks: List[LegGreeks]):
+def compute_vanna_neutral_adjustment(
+    leg_greeks: List[LegGreeks],
+    put_legs: List[Leg],
+    spot: float,
+    iv: float,
+    rate: float,
+    calc_date: date,
+) -> Optional[Dict]:
+    """
+    Solve for the Short Subsidy quantity that brings portfolio vanna to zero.
+
+    Returns a dict with current_qty, recommended_qty, delta_qty, projected_vanna,
+    or None if the subsidy leg has negligible vanna per contract.
+    """
+    total_vanna = sum(g.vanna for g in leg_greeks)
+
+    subsidy_leg = put_legs[_SUBSIDY_IDX]
+    T = max((subsidy_leg.expiry_date - calc_date).days / 365.0, 0.001)
+    # Vanna per 1 additional SELL contract of Short Subsidy (sign = -1)
+    vanna_per_contract = bs_vanna(spot, subsidy_leg.computed_strike, T, rate, iv) * (-1) * XSP_MULTIPLIER
+
+    if abs(vanna_per_contract) < 1e-8:
+        return None
+
+    contracts_to_add = -total_vanna / vanna_per_contract
+    recommended_qty = max(1, round(subsidy_leg.quantity + contracts_to_add))
+    projected_vanna = total_vanna + (recommended_qty - subsidy_leg.quantity) * vanna_per_contract
+
+    return dict(
+        leg_name=subsidy_leg.name.strip(),
+        current_qty=subsidy_leg.quantity,
+        recommended_qty=recommended_qty,
+        delta_qty=recommended_qty - subsidy_leg.quantity,
+        vanna_per_contract=vanna_per_contract,
+        projected_vanna=projected_vanna,
+    )
+
+
+def print_greeks_summary(leg_greeks: List[LegGreeks], adjustment: Optional[Dict] = None):
     W = 72
     LINE = "=" * W
     DASH = "-" * W
@@ -98,8 +139,22 @@ def print_greeks_summary(leg_greeks: List[LegGreeks]):
         for r in rows:
             print(f"  {str(r[0]):<26} {str(r[1]):^4} {str(r[2]):>10} {str(r[3]):>10} {str(r[4]):>10} {str(r[5]):>8}")
 
-    vanna_neutral_threshold = 0.5
-    vanna_status = "✓ VANNA-NEUTRAL" if abs(total_vanna) < vanna_neutral_threshold else f"✗ net vanna = {total_vanna:+.4f}"
+    vanna_neutral_threshold = 50  # position-scaled units
+    vanna_status = "✓ VANNA-NEUTRAL" if abs(total_vanna) < vanna_neutral_threshold else f"✗ net vanna = {total_vanna:+.1f}"
     print(f"\n  Vanna-neutral check : {vanna_status}  (threshold ±{vanna_neutral_threshold})")
     print(f"  Theta decay         : {total_theta:+.2f} / day  (${total_theta * 30:+.0f} / month est.)")
+
+    if adjustment:
+        adj = adjustment
+        direction = "▲ add" if adj["delta_qty"] > 0 else "▼ reduce by"
+        qty_change = abs(adj["delta_qty"])
+        print(f"\n  VANNA REBALANCE SUGGESTION")
+        print(f"  {'─' * 44}")
+        print(f"  Lever leg    : {adj['leg_name']}")
+        print(f"  Current qty  : {adj['current_qty']} contracts")
+        print(f"  Recommended  : {adj['recommended_qty']} contracts  ({direction} {qty_change})")
+        print(f"  Vanna/contract: {adj['vanna_per_contract']:+.2f}")
+        print(f"  Projected vanna after rebalance: {adj['projected_vanna']:+.1f}")
+        print(f"  Use --auto-vanna to apply automatically.")
+
     print(f"{LINE}\n")
