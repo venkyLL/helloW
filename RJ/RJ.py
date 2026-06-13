@@ -670,6 +670,127 @@ def check_roll_alerts(calc_date: date, spot: float, vix: float,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  SCENARIO P&L ENGINE
+# ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class ScenarioLegResult:
+    name: str
+    action: str
+    quantity: int
+    strike: float
+    entry_price: float
+    scenario_price: float
+    pnl: float          # positive = gain
+
+
+def compute_scenario_pnl(
+    spot_orig: float,
+    spot_scenario: float,
+    iv: float,
+    rate: float,
+    calc_date: date,
+    put_legs: list,
+    call_legs: list,
+    notional: float,
+) -> Tuple[List[ScenarioLegResult], float, float, float]:
+    """
+    Re-price all legs at spot_scenario (same expiries, same IV, same calc_date).
+    Returns (leg_results, hedge_pnl, portfolio_pnl, net_pnl).
+    portfolio_pnl = notional × (scenario_spot - orig_spot) / orig_spot
+    """
+    leg_results = []
+
+    for leg in put_legs + call_legs:
+        T = max((leg.expiry_date - calc_date).days / 365.0, 0.001)
+        if leg.action == "BUY":
+            # long option: gain when price rises
+            if leg.target_delta < 0:
+                new_price = bs_put_price(spot_scenario, leg.computed_strike, T, rate, iv)
+            else:
+                new_price = bs_call_price(spot_scenario, leg.computed_strike, T, rate, iv)
+            new_price = max(new_price, 0.0)
+            pnl = (new_price - leg.est_premium) * leg.quantity * XSP_MULTIPLIER
+        else:
+            # short option: gain when price falls
+            if leg.target_delta < 0:
+                new_price = bs_put_price(spot_scenario, leg.computed_strike, T, rate, iv)
+            else:
+                new_price = bs_call_price(spot_scenario, leg.computed_strike, T, rate, iv)
+            new_price = max(new_price, 0.0)
+            pnl = (leg.est_premium - new_price) * leg.quantity * XSP_MULTIPLIER
+
+        leg_results.append(ScenarioLegResult(
+            name=leg.name,
+            action=leg.action,
+            quantity=leg.quantity,
+            strike=leg.computed_strike,
+            entry_price=leg.est_premium,
+            scenario_price=new_price,
+            pnl=pnl,
+        ))
+
+    hedge_pnl = sum(r.pnl for r in leg_results)
+    portfolio_pnl = notional * (spot_scenario - spot_orig) / spot_orig
+    net_pnl = portfolio_pnl + hedge_pnl
+
+    return leg_results, hedge_pnl, portfolio_pnl, net_pnl
+
+
+def print_scenario_sheet(
+    spot_orig: float,
+    spot_scenario: float,
+    leg_results: List[ScenarioLegResult],
+    hedge_pnl: float,
+    portfolio_pnl: float,
+    net_pnl: float,
+    notional: float,
+):
+    W = 72
+    LINE = "=" * W
+    DASH = "-" * W
+
+    pct_move = (spot_scenario - spot_orig) / spot_orig * 100
+    print(f"\n{LINE}")
+    print(f"  SCENARIO ANALYSIS  —  XSP {spot_orig:.2f} → {spot_scenario:.2f}  ({pct_move:+.1f}%)")
+    print(LINE)
+
+    headers = ["Leg", "Act", "Qty", "Strike", "Entry $", "Scen $", "P&L"]
+    rows = []
+    for r in leg_results:
+        rows.append([
+            r.name,
+            r.action,
+            r.quantity,
+            f"{r.strike:.0f}",
+            _fmt_prem(r.entry_price),
+            _fmt_prem(r.scenario_price),
+            _fmt_dollar(r.pnl),
+        ])
+
+    rows.append(["─" * 22, "", "", "", "", "", ""])
+    rows.append(["TOTAL HEDGE P&L", "", "", "", "", "", _fmt_dollar(hedge_pnl)])
+
+    if HAS_TABULATE:
+        print(tabulate(rows, headers=headers, tablefmt="simple",
+                       colalign=("left", "center", "right", "right", "right", "right", "right")))
+    else:
+        print(f"  {'Leg':<26} {'Act':^4} {'Qty':>4} {'Strike':>7} {'Entry':>8} {'Scen':>8} {'P&L':>10}")
+        for r in rows:
+            print(f"  {str(r[0]):<26} {str(r[1]):^4} {str(r[2]):>4} {str(r[3]):>7} "
+                  f"{str(r[4]):>8} {str(r[5]):>8} {str(r[6]):>10}")
+
+    print(f"\n{DASH}")
+    print(f"  Portfolio loss ({pct_move:+.1f}% × ${notional:,.0f})  : {_fmt_dollar(portfolio_pnl)}")
+    print(f"  Hedge P&L                            : {_fmt_dollar(hedge_pnl)}")
+    print(f"  {'─' * 43}")
+    net_label = "NET GAIN" if net_pnl >= 0 else "NET LOSS"
+    net_pct = net_pnl / notional * 100
+    print(f"  {net_label:<38} : {_fmt_dollar(net_pnl)}  ({net_pct:+.1f}% of notional)")
+    print(f"{LINE}\n")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  OUTPUT FORMATTER
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -889,6 +1010,9 @@ Examples:
                    help="TWS port 7497 (paper 7496) or IB Gateway 4001 (paper 4002). Default: 7497")
     p.add_argument("--ibkr-client-id", type=int, default=10,
                    help="IBKR client ID (default: 10)")
+    # Scenario analysis
+    p.add_argument("--scenario", type=float, default=None,
+                   help="Hypothetical XSP spot price — shows hedge P&L vs. portfolio loss at that level")
     return p.parse_args()
 
 
@@ -1050,6 +1174,28 @@ def main():
         last_roll_date, last_roll_spot, alerts,
         data_source=data_source,
     )
+
+    # ── Step 4: optional scenario analysis ────────────────────────────────────
+    if args.scenario is not None:
+        leg_results, hedge_pnl, portfolio_pnl, net_pnl = compute_scenario_pnl(
+            spot_orig=spot,
+            spot_scenario=args.scenario,
+            iv=iv,
+            rate=rate,
+            calc_date=calc_date,
+            put_legs=put_legs,
+            call_legs=call_legs,
+            notional=notional,
+        )
+        print_scenario_sheet(
+            spot_orig=spot,
+            spot_scenario=args.scenario,
+            leg_results=leg_results,
+            hedge_pnl=hedge_pnl,
+            portfolio_pnl=portfolio_pnl,
+            net_pnl=net_pnl,
+            notional=notional,
+        )
 
 
 if __name__ == "__main__":
