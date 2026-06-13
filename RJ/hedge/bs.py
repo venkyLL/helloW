@@ -47,6 +47,51 @@ def bs_call_price(S: float, K: float, T: float, r: float, sigma: float) -> float
     return S * _norm_cdf(d1) - K * math.exp(-r * T) * _norm_cdf(d2)
 
 
+def _norm_pdf(x: float) -> float:
+    return math.exp(-0.5 * x * x) / math.sqrt(2 * math.pi)
+
+
+def _d1d2(S: float, K: float, T: float, r: float, sigma: float):
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    return d1, d1 - sigma * math.sqrt(T)
+
+
+def bs_gamma(S: float, K: float, T: float, r: float, sigma: float) -> float:
+    """Gamma: ∂²V/∂S² — identical for puts and calls."""
+    if T <= 0 or sigma <= 0 or K <= 0:
+        return 0.0
+    d1, _ = _d1d2(S, K, T, r, sigma)
+    return _norm_pdf(d1) / (S * sigma * math.sqrt(T))
+
+
+def bs_vanna(S: float, K: float, T: float, r: float, sigma: float) -> float:
+    """Vanna: ∂Δ/∂σ — identical for puts and calls."""
+    if T <= 0 or sigma <= 0 or K <= 0:
+        return 0.0
+    d1, d2 = _d1d2(S, K, T, r, sigma)
+    return -_norm_pdf(d1) * d2 / sigma
+
+
+def bs_theta_put(S: float, K: float, T: float, r: float, sigma: float) -> float:
+    """Put theta per calendar day."""
+    if T <= 0 or sigma <= 0 or K <= 0:
+        return 0.0
+    d1, d2 = _d1d2(S, K, T, r, sigma)
+    decay = -S * _norm_pdf(d1) * sigma / (2 * math.sqrt(T))
+    carry = r * K * math.exp(-r * T) * _norm_cdf(-d2)
+    return (decay + carry) / 365.0
+
+
+def bs_theta_call(S: float, K: float, T: float, r: float, sigma: float) -> float:
+    """Call theta per calendar day."""
+    if T <= 0 or sigma <= 0 or K <= 0:
+        return 0.0
+    d1, d2 = _d1d2(S, K, T, r, sigma)
+    decay = -S * _norm_pdf(d1) * sigma / (2 * math.sqrt(T))
+    carry = -r * K * math.exp(-r * T) * _norm_cdf(d2)
+    return (decay + carry) / 365.0
+
+
 def _bisection(f, a: float, b: float, tol: float = 0.10, max_iter: int = 60) -> float:
     fa, fb = f(a), f(b)
     if fa * fb > 0:

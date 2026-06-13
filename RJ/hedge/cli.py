@@ -10,6 +10,7 @@ from .data import fetch_live_yfinance, fetch_ibkr_chain
 from .legs import classify_vix, nearest_expiry, PUT_LEGS, build_put_spine, build_call_engine
 from .output import check_roll_alerts, print_position_sheet
 from .scenario import compute_scenario_pnl, print_scenario_sheet, compute_1year_table, print_1year_table
+from .greeks import compute_portfolio_greeks, print_greeks_summary
 
 
 def parse_args():
@@ -209,7 +210,11 @@ def main():
         data_source=data_source,
     )
 
-    # ── Step 4: 1-year cost table ──────────────────────────────────────────────
+    # ── Step 4: portfolio Greeks ───────────────────────────────────────────────
+    leg_greeks = compute_portfolio_greeks(put_legs, call_legs, spot, iv, rate, calc_date)
+    print_greeks_summary(leg_greeks)
+
+    # ── Step 5: 1-year cost table ──────────────────────────────────────────────
     net_put = sum(l.est_total for l in put_legs)
     net_call = sum(l.est_total for l in call_legs)
     year_rows = compute_1year_table(
@@ -218,7 +223,7 @@ def main():
     )
     print_1year_table(year_rows, notional)
 
-    # ── Step 5: optional scenario analysis ────────────────────────────────────
+    # ── Step 6: optional scenario analysis ────────────────────────────────────
     if args.scenario is not None:
         leg_results, hedge_pnl, portfolio_pnl, net_pnl = compute_scenario_pnl(
             spot_orig=spot, spot_scenario=args.scenario,
